@@ -21,7 +21,7 @@ public class Oauth2GenericAuthenticatorConstants {
 
     public static final String OAUTH2_GRANT_TYPE_CODE = "code";
     public static final String EMAIL = "email";
-    public static final String DEFAULT_USER_IDENTIFIER = "id";
+    public static final String DEFAULT_USER_IDENTIFIER = "sub";
     public static final String OAUTH2_PARAM_STATE = "state";
     public static final String OAUTH2_LOGIN_TYPE = "oauth2";
     public static final String AUTHENTICATOR_NAME = "OAUTH2";
@@ -56,6 +56,15 @@ public class Oauth2GenericAuthenticatorConstants {
     public static final String IS_BASIC_AUTH_ENABLED_DP = "Enable HTTP basic auth for client authentication";
     public static final String IS_BASIC_AUTH_ENABLED_DESC =
             "Specifies that HTTP basic authentication should be used for client authentication, else client credentials will be included in the request body";
+
+    public static final String IS_LOGOUT_ENABLED = "IsLogoutEnabled";
+    public static final String IS_LOGOUT_ENABLED_DP = "Enable Logout with federated IDP";
+    public static final String IS_LOGOUT_ENABLED_DESC =
+            "Specifies that logout should be enabled for federated IDP";
+
+    public static final String OAUTH_USER_LOGOUT_URL = "LogoutURL";
+    public static final String OAUTH_USER_LOGOUT__URL_DP = "Logout Url";
+    public static final String OAUTH_USER_LOGOUT__URL_DESC = "Enter Logout endpoint Url";
 
     public static final String SCOPE = "Scope";
     public static final String SCOPE_DP = "Scope";

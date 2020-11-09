@@ -21,20 +21,24 @@ import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.oltu.oauth2.client.OAuthClient;
+import org.apache.oltu.oauth2.client.URLConnectionClient;
 import org.apache.oltu.oauth2.client.request.OAuthClientRequest;
 import org.apache.oltu.oauth2.client.response.OAuthAuthzResponse;
+import org.apache.oltu.oauth2.client.response.OAuthClientResponse;
 import org.apache.oltu.oauth2.common.OAuth;
 import org.apache.oltu.oauth2.common.exception.OAuthProblemException;
 import org.apache.oltu.oauth2.common.exception.OAuthSystemException;
 import org.apache.oltu.oauth2.common.message.types.GrantType;
 import org.apache.oltu.oauth2.common.utils.JSONUtils;
-import org.json.JSONObject;
 import org.wso2.carbon.identity.application.authentication.framework.AbstractApplicationAuthenticator;
 import org.wso2.carbon.identity.application.authentication.framework.FederatedApplicationAuthenticator;
 import org.wso2.carbon.identity.application.authentication.framework.context.AuthenticationContext;
 import org.wso2.carbon.identity.application.authentication.framework.exception.ApplicationAuthenticatorException;
 import org.wso2.carbon.identity.application.authentication.framework.exception.AuthenticationFailedException;
+import org.wso2.carbon.identity.application.authentication.framework.exception.LogoutFailedException;
 import org.wso2.carbon.identity.application.authentication.framework.model.AuthenticatedUser;
+import org.wso2.carbon.identity.application.authentication.framework.util.FrameworkConstants;
 import org.wso2.carbon.identity.application.authentication.framework.util.FrameworkUtils;
 import org.wso2.carbon.identity.application.common.model.ClaimMapping;
 import org.wso2.carbon.identity.application.common.model.Property;
@@ -42,21 +46,17 @@ import org.wso2.carbon.identity.base.IdentityConstants;
 import org.wso2.carbon.identity.core.util.IdentityIOStreamUtils;
 import org.wso2.carbon.identity.core.util.IdentityUtil;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.math.BigInteger;
-import java.net.HttpURLConnection;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.net.URLConnection;
+import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -74,6 +74,9 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
     private String userInfoEndpoint;
     private String stateToken;
 
+    private static final String DYNAMIC_PARAMETER_LOOKUP_REGEX = "\\$\\{(\\w+)\\}";
+    private static Pattern pattern = Pattern.compile(DYNAMIC_PARAMETER_LOOKUP_REGEX);
+
     @Override
     protected void initiateAuthenticationRequest(HttpServletRequest request, HttpServletResponse response,
                                                  AuthenticationContext context) throws AuthenticationFailedException {
@@ -90,21 +93,75 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
             String clientId = authenticatorProperties.get(Oauth2GenericAuthenticatorConstants.CLIENT_ID);
             String callbackUrl = authenticatorProperties.get(Oauth2GenericAuthenticatorConstants.CALLBACK_URL);
             String authorizationEP = getAuthorizationServerEndpoint(authenticatorProperties);
+            String scope = authenticatorProperties.get(Oauth2GenericAuthenticatorConstants.SCOPE);
+            String state = stateToken + "," + Oauth2GenericAuthenticatorConstants.OAUTH2_LOGIN_TYPE;
 
             context.setContextIdentifier(stateToken);
 
-            String state = stateToken + "," + Oauth2GenericAuthenticatorConstants.OAUTH2_LOGIN_TYPE;
-            OAuthClientRequest authzRequest = OAuthClientRequest.authorizationLocation(authorizationEP)
-                    .setClientId(clientId).setResponseType(Oauth2GenericAuthenticatorConstants.OAUTH2_GRANT_TYPE_CODE)
-                    .setRedirectURI(callbackUrl)
-                    .setState(state)
-                    .buildQueryMessage();
+
+            String queryString = getQueryString(authenticatorProperties);
+            queryString = interpretQueryString(queryString, request.getParameterMap());
+            Map<String, String> paramValueMap = new HashMap<>();
+
+            if (StringUtils.isNotBlank(queryString)) {
+                String[] params = queryString.split("&");
+                for (String param : params) {
+                    String[] intParam = param.split("=");
+                    if (intParam.length >= 2) {
+                        paramValueMap.put(intParam[0], intParam[1]);
+                    }
+                }
+            }
+
+            OAuthClientRequest authzRequest;
+
+            if (StringUtils.isNotBlank(queryString) && queryString.toLowerCase().contains("scope=") && queryString
+                    .toLowerCase().contains("redirect_uri=")) {
+                authzRequest = OAuthClientRequest.authorizationLocation(authorizationEP)
+                        .setClientId(clientId)
+                        .setResponseType(Oauth2GenericAuthenticatorConstants.OAUTH2_GRANT_TYPE_CODE)
+                        .setState(state)
+                        .buildQueryMessage();
+            } else if (StringUtils.isNotBlank(queryString) && queryString.toLowerCase().contains("scope=")) {
+                authzRequest = OAuthClientRequest.authorizationLocation(authorizationEP)
+                        .setClientId(clientId)
+                        .setRedirectURI(callbackUrl)
+                        .setResponseType(Oauth2GenericAuthenticatorConstants.OAUTH2_GRANT_TYPE_CODE)
+                        .setState(state)
+                        .buildQueryMessage();
+            } else {
+                authzRequest = OAuthClientRequest.authorizationLocation(authorizationEP)
+                        .setClientId(clientId)
+                        .setRedirectURI(callbackUrl)
+                        .setResponseType(Oauth2GenericAuthenticatorConstants.OAUTH2_GRANT_TYPE_CODE)
+                        .setScope(scope)
+                        .setState(state)
+                        .buildQueryMessage();
+            }
+
+            String loginPage = authzRequest.getLocationUri();
+            String domain = request.getParameter("domain");
+
+            if (StringUtils.isNotBlank(domain)) {
+                loginPage = loginPage + "&fidp=" + domain;
+            }
+
+            if (StringUtils.isNotBlank(queryString)) {
+                if (!queryString.startsWith("&")) {
+                    loginPage = loginPage + "&" + queryString;
+                } else {
+                    loginPage = loginPage + queryString;
+                }
+            }
 
             if (logger.isDebugEnabled()) {
                 logger.debug(String.join("Authorization Request",authzRequest.getLocationUri()));
             }
 
-            response.sendRedirect(authzRequest.getLocationUri());
+            logger.info("MBRLIAMSUB-4  Additional Logs : Authorized Request URL : "  + loginPage);
+
+            response.sendRedirect(loginPage);
+
         } catch (IOException e) {
             logger.error("Exception while sending to the login page.", e);
             throw new AuthenticationFailedException(e.getMessage(), e);
@@ -130,10 +187,15 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
             Boolean basicAuthEnabled = Boolean.parseBoolean(
                     authenticatorProperties.get(Oauth2GenericAuthenticatorConstants.IS_BASIC_AUTH_ENABLED));
             String code = getAuthorizationCode(request);
+
+            logger.info("MBRLIAMSUB-4  Additional Logs : Received Authorization Code : "  + code);
+
             String tokenEP = getTokenEndpoint(authenticatorProperties);
             String token = getToken(tokenEP, clientId, clientSecret, code, redirectUri, basicAuthEnabled);
             String userInfoEP = getUserInfoEndpoint(authenticatorProperties);
             String responseBody = getUserInfo(userInfoEP, token);
+
+            logger.info("MBRLIAMSUB-4  Additional Logs : UserInfo Response : "  + responseBody);
 
             if (logger.isDebugEnabled()) {
                 logger.debug("Get user info response : " + responseBody);
@@ -146,6 +208,53 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
         }
 
     }
+
+
+
+    protected void initiateLogoutRequest(HttpServletRequest request,
+                                         HttpServletResponse response, AuthenticationContext context)
+            throws LogoutFailedException {
+
+        Map<String, String> authenticatorProperties = context.getAuthenticatorProperties();
+//        boolean logoutEnabled = Boolean.parseBoolean(
+//                authenticatorProperties.get(Oauth2GenericAuthenticatorConstants.IS_LOGOUT_ENABLED));
+
+        boolean logoutEnabled = true;
+
+        if (logoutEnabled) {
+            //send logout request to external idp
+            String idpLogoutURL =
+                    authenticatorProperties.get(Oauth2GenericAuthenticatorConstants.OAUTH_USER_LOGOUT_URL);
+
+            logger.info("MBRLIAMSUB-24  Logout enabled & Logout URL : "  + idpLogoutURL);
+
+            if (idpLogoutURL == null || idpLogoutURL.trim().length() == 0) {
+                throw new LogoutFailedException(
+                        "Logout is enabled for the IdP but Logout URL is not configured");
+            }
+
+            try {
+                    response.sendRedirect(idpLogoutURL);
+            } catch (IOException e) {
+                logger.error(e);
+                throw new LogoutFailedException(e.getMessage(), e);
+            }
+        } else {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    @Override
+    protected void processLogoutResponse(HttpServletRequest request,
+                                         HttpServletResponse response, AuthenticationContext context)
+            throws LogoutFailedException {
+
+        logger.info("MBRLIAMSUB-24  Logout response is received ");
+        throw new UnsupportedOperationException();
+    }
+
+
+
 
     protected void buildClaims(AuthenticationContext context, String userInfoString)
             throws ApplicationAuthenticatorException, AuthenticationFailedException {
@@ -177,7 +286,7 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
             }
             String subjectFromClaims = FrameworkUtils
                     .getFederatedSubjectFromClaims(context.getExternalIdP().getIdentityProvider(), claims);
-            if (StringUtils.isBlank(subjectFromClaims)) {
+            if (StringUtils.isNotBlank(subjectFromClaims)) {
                 AuthenticatedUser authenticatedUser = AuthenticatedUser
                         .createFederateAuthenticatedUserFromSubjectIdentifier(subjectFromClaims);
                 context.setSubject(authenticatedUser);
@@ -190,6 +299,7 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
             if (logger.isDebugEnabled()) {
                 logger.debug("Decoded json object is null");
             }
+            logger.error("Decoded json object is null");
             throw new AuthenticationFailedException("Decoded json object is null");
         }
     }
@@ -199,7 +309,11 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
 
         String authenticatedUserId = jsonObject.get(Oauth2GenericAuthenticatorConstants.DEFAULT_USER_IDENTIFIER)
                 .toString();
+
+        logger.info("MBRLIAMSUB-4  Additional Logs : Username from UserInfo Response: "  + authenticatedUserId);
+
         if (StringUtils.isEmpty(authenticatedUserId)) {
+            logger.error("Authenticated user identifier is empty");
             throw new ApplicationAuthenticatorException("Authenticated user identifier is empty");
         }
         AuthenticatedUser authenticatedUser = AuthenticatedUser
@@ -209,30 +323,22 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
 
     protected String getToken(String tokenEndPoint, String clientId, String clientSecret, String code,
                               String redirectUri, Boolean basicAuthEnabled)
-            throws ApplicationAuthenticatorException {
+            throws ApplicationAuthenticatorException, AuthenticationFailedException {
 
-        OAuthClientRequest tokenRequest = null;
-        String token;
-        String tokenResponseStr;
-        try {
-            String state = this.stateToken;
-            tokenRequest =
-                    buidTokenRequest(tokenEndPoint, clientId, clientSecret, state, code, redirectUri, basicAuthEnabled);
-            tokenResponseStr = sendRequest(tokenRequest.getLocationUri());
-            JSONObject tokenResponse = new JSONObject(tokenResponseStr);
-            token = tokenResponse.getString(Oauth2GenericAuthenticatorConstants.ACCESS_TOKEN);
-            if (StringUtils.isBlank(token)) {
-                throw new ApplicationAuthenticatorException("Received access token is invalid.");
-            }
-        } catch (
-                MalformedURLException e) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("URL : " + tokenRequest.getLocationUri());
-            }
-            throw new ApplicationAuthenticatorException("MalformedURLException while sending access token request.", e);
-        } catch (
-                IOException e) {
-            throw new ApplicationAuthenticatorException("IOException while sending access token request.", e);
+        String state = this.stateToken;
+        OAuthClientRequest tokenRequest =
+                buidTokenRequest(tokenEndPoint, clientId, clientSecret, state, code, redirectUri, basicAuthEnabled);
+
+        OAuthClient oAuthClient = new OAuthClient(new URLConnectionClient());
+        OAuthClientResponse oAuthResponse = getOauthResponse(oAuthClient, tokenRequest);
+
+        String token =  oAuthResponse.getParam(Oauth2GenericAuthenticatorConstants.ACCESS_TOKEN);
+
+        logger.info("MBRLIAMSUB-4  Additional Logs : Access Token  : "  + token);
+
+        if (StringUtils.isBlank(token)) {
+            logger.error("Received access token is invalid : " + token);
+            throw new ApplicationAuthenticatorException("Received access token is invalid.");
         }
         return token;
     }
@@ -244,6 +350,7 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
             authzResponse = OAuthAuthzResponse.oauthCodeAuthzResponse(request);
             return authzResponse.getCode();
         } catch (OAuthProblemException e) {
+            logger.error(e);
             throw new ApplicationAuthenticatorException("Exception while reading authorization code.", e);
         }
     }
@@ -276,16 +383,22 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
         OAuthClientRequest tokenRequest;
         try {
             if (!basicAuthEnabled) {
-                tokenRequest = OAuthClientRequest.tokenLocation(tokenEndPoint).setClientId(clientId)
-                        .setClientSecret(clientSecret).setGrantType(GrantType.AUTHORIZATION_CODE).setCode(code)
+                tokenRequest = OAuthClientRequest.tokenLocation(tokenEndPoint)
+                        .setClientId(clientId)
+                        .setClientSecret(clientSecret)
+                        .setGrantType(GrantType.AUTHORIZATION_CODE)
+                        .setCode(code)
                         .setRedirectURI(redirectUri)
                         .setParameter(Oauth2GenericAuthenticatorConstants.OAUTH2_PARAM_STATE, state)
-                        .buildQueryMessage();
+                        .buildBodyMessage();
             } else {
-                tokenRequest = OAuthClientRequest.tokenLocation(tokenEndPoint).setClientId(clientId)
-                        .setClientSecret(clientSecret).setGrantType(GrantType.AUTHORIZATION_CODE).setCode(code)
+                tokenRequest = OAuthClientRequest.tokenLocation(tokenEndPoint)
+                        .setGrantType(GrantType.AUTHORIZATION_CODE)
+                        .setCode(code)
+                        .setRedirectURI(redirectUri)
                         .setParameter(Oauth2GenericAuthenticatorConstants.OAUTH2_PARAM_STATE, state)
-                        .buildQueryMessage();
+                        .buildBodyMessage();
+
                 String base64EncodedCredential =
                         new String(Base64.encodeBase64((clientId + Oauth2GenericAuthenticatorConstants.COLON +
                                 clientSecret).getBytes()));
@@ -293,8 +406,12 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
                         Oauth2GenericAuthenticatorConstants.AUTH_TYPE + base64EncodedCredential);
             }
         } catch (OAuthSystemException e) {
+            logger.error(e);
             throw new ApplicationAuthenticatorException("Exception while building access token request.", e);
         }
+
+        logger.info("MBRLIAMSUB-4  Additional Logs : Token Request Body URL : "  + tokenRequest.getBody());
+
         return tokenRequest;
     }
 
@@ -369,6 +486,34 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
         enableBasicAuth.setDisplayOrder(8);
         configProperties.add(enableBasicAuth);
 
+
+//        Property enableLogout = new Property();
+//        enableLogout.setName(Oauth2GenericAuthenticatorConstants.IS_LOGOUT_ENABLED);
+//        enableLogout.setDisplayName(Oauth2GenericAuthenticatorConstants.IS_LOGOUT_ENABLED_DP);
+//        enableLogout.setRequired(false);
+//        enableLogout.setDescription(Oauth2GenericAuthenticatorConstants.IS_LOGOUT_ENABLED_DESC);
+//        enableLogout.setType(Oauth2GenericAuthenticatorConstants.VAR_TYPE_BOOLEAN);
+//        enableLogout.setDisplayOrder(9);
+//        configProperties.add(enableLogout);
+
+        Property logoutUrl = new Property();
+        logoutUrl.setName(Oauth2GenericAuthenticatorConstants.OAUTH_USER_LOGOUT_URL);
+        logoutUrl.setDisplayName(Oauth2GenericAuthenticatorConstants.OAUTH_USER_LOGOUT__URL_DP);
+        logoutUrl.setRequired(false);
+        logoutUrl.setDescription(Oauth2GenericAuthenticatorConstants.OAUTH_USER_LOGOUT__URL_DESC);
+        logoutUrl.setDisplayOrder(9);
+        configProperties.add(logoutUrl);
+
+        Property additionalParams = new Property();
+        additionalParams.setName("commonAuthQueryParams");
+        additionalParams.setDisplayName("Additional Query Parameters");
+        additionalParams.setRequired(false);
+        additionalParams.setDescription("Additional query parameters. e.g: paramName1=value1");
+        additionalParams.setType("string");
+        additionalParams.setDisplayOrder(11);
+        configProperties.add(additionalParams);
+
+
         return configProperties;
     }
 
@@ -391,10 +536,28 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
                 return readBody(con.getErrorStream());
             }
         } catch (IOException e) {
+            logger.error(e);
             throw new RuntimeException("API Invoke failed", e);
         } finally {
             con.disconnect();
         }
+    }
+
+
+    protected OAuthClientResponse getOauthResponse(OAuthClient oAuthClient, OAuthClientRequest accessRequest)
+            throws AuthenticationFailedException {
+
+        OAuthClientResponse oAuthResponse;
+        try {
+            oAuthResponse = oAuthClient.accessToken(accessRequest);
+        } catch (OAuthSystemException | OAuthProblemException e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Exception while requesting access token", e);
+            }
+            logger.error(e);
+            throw new AuthenticationFailedException(e.getMessage(), e);
+        }
+        return oAuthResponse;
     }
 
     protected HttpURLConnection connect(String apiUrl) {
@@ -403,8 +566,10 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
             URL url = new URL(apiUrl);
             return (HttpURLConnection) url.openConnection();
         } catch (MalformedURLException e) {
+            logger.error(e);
             throw new RuntimeException("API URL is Invalid. : " + apiUrl, e);
         } catch (IOException e) {
+            logger.error(e);
             throw new RuntimeException("Connection failed. : " + apiUrl, e);
         }
     }
@@ -423,6 +588,7 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
 
             return responseBody.toString();
         } catch (IOException e) {
+            logger.error(e);
             throw new RuntimeException("API Failed to read response.", e);
         }
     }
@@ -547,6 +713,41 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
             initUserInfoEndPoint(authenticatorProperties);
         }
         return this.userInfoEndpoint;
+    }
+
+
+    protected String getQueryString(Map<String, String> authenticatorProperties) {
+
+        return authenticatorProperties.get(FrameworkConstants.QUERY_PARAMS);
+    }
+
+    private String interpretQueryString(String queryString, Map<String, String[]> parameters) {
+
+        if (StringUtils.isBlank(queryString)) {
+            return null;
+        }
+        Matcher matcher = pattern.matcher(queryString);
+        while (matcher.find()) {
+            String name = matcher.group(1);
+            String[] values = parameters.get(name);
+            String value = "";
+            if (values != null && values.length > 0) {
+                value = values[0];
+            }
+            try {
+                value = URLEncoder.encode(value, StandardCharsets.UTF_8.name());
+            } catch (UnsupportedEncodingException e) {
+                logger.error("Error while encoding the query param: " + name + " with value: " + value, e);
+            }
+            if (logger.isDebugEnabled()) {
+                logger.debug("InterpretQueryString name: " + name + ", value: " + value);
+            }
+            queryString = queryString.replaceAll("\\$\\{" + name + "}", Matcher.quoteReplacement(value));
+        }
+        if (logger.isDebugEnabled()) {
+            logger.debug("Output QueryString: " + queryString);
+        }
+        return queryString;
     }
 
 }
