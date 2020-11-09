@@ -179,6 +179,14 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
             logger.debug("processAuthenticationResponse");
         }
 
+        if (isOauth2ErrorParamExists(request)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("OAuth error received from federated IdP: "
+                        + request.getParameter(Oauth2GenericAuthenticatorConstants.OAUTH2_PARAM_ERROR));
+            }
+            throw new AuthenticationFailedException("Authentication failed.");
+        }
+
         try {
             Map<String, String> authenticatorProperties = context.getAuthenticatorProperties();
             String clientId = authenticatorProperties.get(Oauth2GenericAuthenticatorConstants.CLIENT_ID);
@@ -598,6 +606,11 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
         return request.getParameter(Oauth2GenericAuthenticatorConstants.OAUTH2_GRANT_TYPE_CODE) != null;
     }
 
+    protected boolean isOauth2ErrorParamExists(HttpServletRequest request) {
+
+        return request.getParameter(Oauth2GenericAuthenticatorConstants.OAUTH2_PARAM_ERROR) != null;
+    }
+
     protected String getLoginType(HttpServletRequest request) {
 
         String state = request.getParameter(Oauth2GenericAuthenticatorConstants.OAUTH2_PARAM_STATE);
@@ -617,7 +630,8 @@ public class Oauth2GenericAuthenticator extends AbstractApplicationAuthenticator
     @Override
     public boolean canHandle(HttpServletRequest request) {
 
-        return isOauthStateParamExists(request) && isOauth2CodeParamExists(request);
+        return isOauthStateParamExists(request) && (isOauth2CodeParamExists(request)
+                || isOauth2ErrorParamExists(request));
     }
 
     @Override
